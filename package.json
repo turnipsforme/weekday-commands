@@ -1,12 +1,13 @@
 {
   "name": "weekday-commands",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Obsidian plugin with commands for each day of the week.",
   "main": "main.js",
   "scripts": {
     "build": "tsc --noEmit && esbuild main.ts --bundle --outfile=main.js --format=cjs --platform=node --external:obsidian",
     "lint": "eslint .",
-    "check": "npm run lint && npm run build"
+    "check": "npm run lint && npm run build && npm test",
+    "test": "node --test tests/*.test.cjs"
   },
   "devDependencies": {
     "esbuild": "^0.25.4",

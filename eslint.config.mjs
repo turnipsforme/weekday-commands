@@ -8,6 +8,7 @@ export default defineConfig(
     "main.js",
     "release",
     "runtime",
+    "tests",
     "esbuild.config.mjs",
     "eslint.config.mjs",
     "package.json",

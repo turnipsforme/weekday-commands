@@ -25,10 +25,6 @@ interface NativeDailyNoteSettings {
   template: string;
 }
 
-interface EffectiveDailyNoteSettings extends NativeDailyNoteSettings {
-  useNativeCreation: boolean;
-}
-
 interface NaturalLanguageDatesPlugin {
   parseDate: (date: string) =>
     | {
@@ -109,6 +105,9 @@ const DATE_INPUT_FORMATS = [
 
 export default class WeekdayCommandsPlugin extends Plugin {
   settings!: WeekdayCommandsSettings;
+  private pendingCreations = new Map<string, Promise<TFile>>();
+  private settingsSave: Promise<void> = Promise.resolve();
+  private dateModal?: NaturalLanguageDateModal;
 
   async onload() {
     await this.loadSettings();
@@ -117,7 +116,9 @@ export default class WeekdayCommandsPlugin extends Plugin {
       id: "open-daily-note-by-date",
       name: "Go to daily note by date",
       callback: () => {
-        new NaturalLanguageDateModal(this.app, this).open();
+        this.dateModal?.close();
+        this.dateModal = new NaturalLanguageDateModal(this.app, this);
+        this.dateModal.open();
       },
     });
 
@@ -126,6 +127,7 @@ export default class WeekdayCommandsPlugin extends Plugin {
     }
 
     this.addSettingTab(new WeekdayCommandsSettingTab(this.app, this));
+    this.register(() => this.dateModal?.close());
   }
 
   async loadSettings(): Promise<void> {
@@ -133,8 +135,15 @@ export default class WeekdayCommandsPlugin extends Plugin {
     this.settings = parseSettings(stored);
   }
 
-  async saveSettings(): Promise<void> {
-    await this.saveData(this.settings);
+  saveSettings(): Promise<void> {
+    const settings = { ...this.settings };
+    this.settingsSave = this.settingsSave
+      .then(() => this.saveData(settings))
+      .catch((error: unknown) => {
+        console.error("Weekday Commands: failed to save settings", error);
+        new Notice("Could not save weekday commands settings. Please try again.");
+      });
+    return this.settingsSave;
   }
 
   private createWeekdayCommand(targetDay: number, label: string): Command {
@@ -154,84 +163,122 @@ export default class WeekdayCommandsPlugin extends Plugin {
 
   async openDailyNoteFromInput(input: string): Promise<boolean> {
     const date = this.parseNaturalDate(input);
-    if (!date) {
+    if (!date?.isValid() || !Number.isFinite(date.valueOf())) {
       new Notice(`Could not understand date: ${input}`);
       return false;
     }
 
-    await this.openDailyNote(date);
-    return true;
+    return this.openDailyNote(date);
   }
 
-  async openRecentDailyNote(file: TFile): Promise<void> {
-    await this.openFile(file);
+  async openRecentDailyNote(file: TFile): Promise<boolean> {
+    try {
+      if (this.app.vault.getAbstractFileByPath(file.path) !== file) {
+        throw new Error("This note was moved or deleted. Reopen the date picker to refresh the list.");
+      }
+      await this.openFile(file);
+      return true;
+    } catch (error) {
+      this.reportOpenError(error);
+      return false;
+    }
+  }
+
+  private reportOpenError(error: unknown): void {
+    console.error("Weekday Commands: failed to open daily note", error);
+    new Notice("Could not open the daily note. Check the daily notes folder and try again.");
   }
 
   getRecentDailyNotes(limit = 3): TFile[] {
-    const dailyNoteSettings = this.getEffectiveDailyNoteSettings();
-    const excludedPaths = new Set(
-      [
-        obsidianMoment().startOf("day"),
-        obsidianMoment().startOf("day").subtract(1, "day"),
-        obsidianMoment().startOf("day").add(1, "day"),
-      ].map((date) => this.buildNotePath(date.format(dailyNoteSettings.format), dailyNoteSettings.folder))
-    );
+    if (!Number.isSafeInteger(limit) || limit <= 0) return [];
 
-    return this.app.vault
-      .getMarkdownFiles()
-      .filter((file) => file.parent?.path === dailyNoteSettings.folder)
-      .filter((file) => !excludedPaths.has(file.path))
-      .filter((file) => this.isDailyNoteFile(file, dailyNoteSettings.format))
-      .sort((first, second) => second.stat.mtime - first.stat.mtime)
-      .slice(0, limit);
-  }
+    const settings = this.getEffectiveDailyNoteSettings();
+    const folder = settings.folder
+      ? this.app.vault.getAbstractFileByPath(settings.folder)
+      : this.app.vault.getRoot();
+    if (!(folder instanceof TFolder)) return [];
 
-  private async openDailyNote(date: moment.Moment): Promise<void> {
-    const dailyNoteSettings = this.getEffectiveDailyNoteSettings();
-    const filePath = this.buildNotePath(date.format(dailyNoteSettings.format), dailyNoteSettings.folder);
-    const existingFile = this.app.vault.getAbstractFileByPath(filePath);
-
-    if (existingFile instanceof TFile) {
-      await this.openFile(existingFile, date);
-      return;
-    }
-
-    if (dailyNoteSettings.useNativeCreation) {
-      try {
-        const createdFile = await this.createDailyNoteLikeCalendar(date, dailyNoteSettings);
-        if (createdFile instanceof TFile) {
-          await this.openFile(createdFile, date);
-          return;
+    const today = obsidianMoment().startOf("day");
+    const excludedPaths = new Set([-1, 0, 1].map((offset) =>
+      this.buildNotePath(today.clone().add(offset, "day").format(settings.format), settings.folder)
+    ));
+    const recent: TFile[] = [];
+    const folders = [folder];
+    const hasDateFolders = settings.format.includes("/");
+    while (folders.length > 0) {
+      const current = folders.pop()!;
+      for (const child of current.children) {
+        if (child instanceof TFolder) {
+          if (hasDateFolders) folders.push(child);
+          continue;
         }
-      } catch (error) {
-        console.error("Weekday Commands: failed to create daily note with Daily Notes template", error);
+        if (!(child instanceof TFile) || child.extension !== "md" || excludedPaths.has(child.path)) continue;
+        if (recent.length === limit && child.stat.mtime <= recent[recent.length - 1].stat.mtime) continue;
+        if (!this.getDateForDailyNoteFile(child, settings)) continue;
+
+        const index = recent.findIndex((file) => child.stat.mtime > file.stat.mtime);
+        recent.splice(index === -1 ? recent.length : index, 0, child);
+        if (recent.length > limit) recent.pop();
       }
     }
-
-    await this.ensureFolderExists(dailyNoteSettings.folder);
-    await this.app.vault.create(filePath, await this.renderDailyNoteTemplate(date, dailyNoteSettings));
-    const createdFile = this.app.vault.getAbstractFileByPath(filePath);
-    if (createdFile instanceof TFile) {
-      await this.openFile(createdFile, date);
-      return;
-    }
-
-    new Notice(`Could not open daily note for ${date.format("YYYY-MM-DD")}.`);
+    return recent;
   }
 
-  private async createDailyNoteLikeCalendar(
+  getDailyNoteLabel(file: TFile): string {
+    return this.getDateForDailyNoteFile(file)?.format("ddd, D MMM YYYY") ?? file.basename;
+  }
+
+  private async openDailyNote(date: moment.Moment): Promise<boolean> {
+    try {
+      const settings = this.getEffectiveDailyNoteSettings();
+      const filePath = this.buildNotePath(date.format(settings.format), settings.folder);
+      const existing = this.app.vault.getAbstractFileByPath(filePath);
+      let file: TFile;
+      if (existing instanceof TFile) {
+        file = existing;
+      } else {
+        let pending = this.pendingCreations.get(filePath);
+        if (!pending) {
+          pending = this.createDailyNote(filePath, date, settings);
+          this.pendingCreations.set(filePath, pending);
+        }
+        try {
+          file = await pending;
+        } finally {
+          if (this.pendingCreations.get(filePath) === pending) this.pendingCreations.delete(filePath);
+        }
+      }
+      await this.openFile(file, date);
+      return true;
+    } catch (error) {
+      this.reportOpenError(error);
+      return false;
+    }
+  }
+
+  private async createDailyNote(
+    filePath: string,
     date: moment.Moment,
-    dailyNoteSettings: EffectiveDailyNoteSettings
-  ): Promise<TFile | null | undefined> {
-    const filename = date.format(dailyNoteSettings.format);
-    const filePath = this.buildNotePath(filename, dailyNoteSettings.folder);
-    await this.ensureFolderExists(dailyNoteSettings.folder);
-    return this.app.vault.create(filePath, await this.renderDailyNoteTemplate(date, dailyNoteSettings));
+    settings: NativeDailyNoteSettings,
+  ): Promise<TFile> {
+    const contents = await this.renderDailyNoteTemplate(date, settings);
+    const lastSlash = filePath.lastIndexOf("/");
+    await this.ensureFolderExists(lastSlash === -1 ? "" : filePath.slice(0, lastSlash));
+    // Another plugin or vault sync may create the note while the template is loading.
+    const existing = this.app.vault.getAbstractFileByPath(filePath);
+    if (existing instanceof TFile) return existing;
+    try {
+      return await this.app.vault.create(filePath, contents);
+    } catch (error) {
+      const created = this.app.vault.getAbstractFileByPath(filePath);
+      if (created instanceof TFile) return created;
+      throw error;
+    }
   }
 
   private async renderDailyNoteTemplate(
     date: moment.Moment,
-    dailyNoteSettings: EffectiveDailyNoteSettings
+    dailyNoteSettings: NativeDailyNoteSettings
   ): Promise<string> {
     const templateContents = await this.getTemplateContents(dailyNoteSettings.template);
     const filename = date.format(dailyNoteSettings.format);
@@ -295,14 +342,18 @@ export default class WeekdayCommandsPlugin extends Plugin {
       }
     }
 
-    const mode = (this.app.vault as { getConfig?: (key: string) => string | undefined }).getConfig?.("defaultViewMode");
-    await this.app.workspace.getLeaf(false).openFile(file, mode ? ({ mode } as never) : undefined);
+    await this.app.workspace.getLeaf(false).openFile(file);
   }
 
-  private getDateForDailyNoteFile(file: TFile): moment.Moment | null {
-    const dailyNoteSettings = this.getEffectiveDailyNoteSettings();
-    const date = obsidianMoment(file.basename, dailyNoteSettings.format, true);
-    return date.isValid() ? date.startOf("day") : null;
+  private getDateForDailyNoteFile(
+    file: TFile,
+    settings = this.getEffectiveDailyNoteSettings(),
+  ): moment.Moment | null {
+    const prefix = settings.folder ? `${settings.folder}/` : "";
+    if (!file.path.startsWith(prefix)) return null;
+    const name = file.path.slice(prefix.length, -3);
+    const date = obsidianMoment(name, settings.format, true);
+    return date.isValid() && date.format(settings.format) === name ? date.startOf("day") : null;
   }
 
   private async openInJournalView(date: moment.Moment): Promise<boolean> {
@@ -354,7 +405,7 @@ export default class WeekdayCommandsPlugin extends Plugin {
       yesterday: today.clone().subtract(1, "day"),
     };
 
-    if (simpleDates[query]) {
+    if (Object.prototype.hasOwnProperty.call(simpleDates, query)) {
       return simpleDates[query].clone();
     }
 
@@ -371,11 +422,6 @@ export default class WeekdayCommandsPlugin extends Plugin {
     const exactDate = obsidianMoment(input.trim(), DATE_INPUT_FORMATS, true);
     if (exactDate.isValid()) {
       return exactDate.startOf("day");
-    }
-
-    const looseDate = obsidianMoment(input.trim());
-    if (looseDate.isValid()) {
-      return looseDate.startOf("day");
     }
 
     return null;
@@ -398,12 +444,14 @@ export default class WeekdayCommandsPlugin extends Plugin {
       query.match(new RegExp(`^${numberPattern} (${Object.keys(unitAliases).join("|")}) from now$`));
     if (relativeMatch) {
       const amount = this.parseAmount(relativeMatch[1]);
+      if (!Number.isSafeInteger(amount)) return null;
       return today.clone().add(amount, unitAliases[relativeMatch[2]]);
     }
 
     const agoMatch = query.match(new RegExp(`^${numberPattern} (${Object.keys(unitAliases).join("|")}) ago$`));
     if (agoMatch) {
       const amount = this.parseAmount(agoMatch[1]);
+      if (!Number.isSafeInteger(amount)) return null;
       return today.clone().subtract(amount, unitAliases[agoMatch[2]]);
     }
 
@@ -431,20 +479,18 @@ export default class WeekdayCommandsPlugin extends Plugin {
     ];
     const monthPattern = monthAliases.map(([monthName]) => monthName.replace(".", "\\.")).join("|");
     const monthMatch = query.match(new RegExp(`^(next|mid|middle of|start of|end of) (${monthPattern})$`));
-    const endOfMonthMatch = query.match(new RegExp(`^end of (${monthPattern})$`));
-    if (!monthMatch && !endOfMonthMatch) {
+    if (!monthMatch) {
       return null;
     }
 
-    const modifier = monthMatch?.[1] ?? "end of";
-    const monthName = monthMatch?.[2] ?? endOfMonthMatch?.[1];
+    const [, modifier, monthName] = monthMatch;
     const targetMonth = monthAliases.find(([alias]) => alias === monthName)?.[1];
     if (targetMonth === undefined) {
       return null;
     }
 
     const targetDate = today.clone().month(targetMonth).startOf("month");
-    if (targetDate.isBefore(today, "month") || modifier === "next") {
+    if (targetDate.isBefore(today, "month") || (modifier === "next" && targetDate.isSame(today, "month"))) {
       targetDate.add(1, "year");
     }
 
@@ -517,7 +563,7 @@ export default class WeekdayCommandsPlugin extends Plugin {
     return null;
   }
 
-  private getEffectiveDailyNoteSettings(): EffectiveDailyNoteSettings {
+  private getEffectiveDailyNoteSettings(): NativeDailyNoteSettings {
     const nativeSettings = this.getNativeDailyNoteSettings();
     const overriddenFolder = this.normalizeFolder(this.settings.dailyNotesFolder);
 
@@ -525,7 +571,6 @@ export default class WeekdayCommandsPlugin extends Plugin {
       format: nativeSettings?.format?.trim() || "YYYY-MM-DD",
       folder: overriddenFolder || this.normalizeFolder(nativeSettings?.folder),
       template: nativeSettings?.template?.trim() || "",
-      useNativeCreation: !overriddenFolder,
     };
   }
 
@@ -551,50 +596,65 @@ export default class WeekdayCommandsPlugin extends Plugin {
     return normalizePath(folder ? `${folder}/${filename}.md` : `${filename}.md`);
   }
 
-  private isDailyNoteFile(file: TFile, format: string): boolean {
-    const date = obsidianMoment(file.basename, format, true);
-    return date.isValid() && date.format(format) === file.basename;
-  }
-
   private normalizeFolder(folder: string | undefined): string {
-    return (folder ?? "").trim().replace(/^\/+|\/+$/g, "");
+    const trimmed = (folder ?? "").trim();
+    if (!trimmed) return "";
+    return normalizePath(trimmed).replace(/^\/+|\/+$/g, "");
   }
 
   private async ensureFolderExists(folder: string): Promise<void> {
-    if (!folder) {
-      return;
+    let path = "";
+    for (const part of folder.split("/").filter(Boolean)) {
+      path = path ? `${path}/${part}` : part;
+      const existing = this.app.vault.getAbstractFileByPath(path);
+      if (existing instanceof TFolder) continue;
+      if (existing) throw new Error(`A file already exists at ${path}.`);
+      try {
+        await this.app.vault.createFolder(path);
+      } catch (error) {
+        if (!(this.app.vault.getAbstractFileByPath(path) instanceof TFolder)) throw error;
+      }
     }
-
-    const normalizedFolder = normalizePath(folder);
-    const existingFolder = this.app.vault.getAbstractFileByPath(normalizedFolder);
-    if (existingFolder instanceof TFolder) {
-      return;
-    }
-
-    await this.app.vault.createFolder(normalizedFolder);
   }
 }
 
 class NaturalLanguageDateModal extends Modal {
   private isSubmitting = false;
+  private isClosed = false;
+  private input?: TextComponent;
+  private submitButton?: HTMLButtonElement;
+  private statusEl?: HTMLElement;
+  private buttons: HTMLButtonElement[] = [];
 
   constructor(app: App, private plugin: WeekdayCommandsPlugin) {
     super(app);
   }
 
   onOpen(): void {
+    this.isClosed = false;
     this.modalEl.addClass("weekday-commands-date-modal");
     this.titleEl.setText("Go to daily note");
     this.contentEl.empty();
 
     const form = this.contentEl.createEl("form", { cls: "weekday-commands-date-form" });
-    const input = new TextComponent(form);
-    input.setPlaceholder("Tomorrow, next friday, 2026-05-29");
+    const input = this.input = new TextComponent(form);
+    input.setPlaceholder("Tomorrow, next friday, 2026-09-22");
     input.inputEl.ariaLabel = "Date";
+    input.inputEl.required = true;
+    input.inputEl.autocomplete = "off";
+    input.inputEl.spellcheck = false;
+    input.inputEl.addEventListener("input", () => this.statusEl?.setText(""));
+
+    this.submitButton = form.createEl("button", { text: "Open note", cls: "mod-cta" });
+    this.submitButton.type = "submit";
+    this.buttons = [this.submitButton];
+    this.statusEl = this.contentEl.createDiv({ cls: "weekday-commands-date-status" });
+    this.statusEl.setAttribute("role", "status");
+    this.statusEl.setAttribute("aria-live", "polite");
 
     form.addEventListener("submit", (event) => {
       event.preventDefault();
-      void this.submitDate(input);
+      void this.submit(() => this.plugin.openDailyNoteFromInput(input.getValue()));
     });
 
     const recentNotes = this.plugin.getRecentDailyNotes();
@@ -607,45 +667,59 @@ class NaturalLanguageDateModal extends Modal {
       const buttons = suggestions.createDiv({ cls: "weekday-commands-recent-notes-buttons" });
 
       for (const file of recentNotes) {
-        const button = buttons.createEl("button", { text: file.basename });
+        const button = buttons.createEl("button", { text: this.plugin.getDailyNoteLabel(file) });
         button.type = "button";
         button.title = file.path;
+        button.setAttribute("aria-label", `Open ${file.path}`);
+        this.buttons.push(button);
         button.addEventListener("click", () => {
-          void this.openRecentNote(file);
+          void this.submit(() => this.plugin.openRecentDailyNote(file));
         });
       }
     }
 
-    window.setTimeout(() => {
-      input.inputEl.focus();
-      input.inputEl.select();
-    });
+    input.inputEl.focus();
   }
 
   onClose(): void {
+    this.isClosed = true;
     this.modalEl.removeClass("weekday-commands-date-modal");
     this.contentEl.empty();
+    this.buttons = [];
+    this.input = undefined;
+    this.submitButton = undefined;
+    this.statusEl = undefined;
   }
 
-  private async submitDate(input: TextComponent): Promise<void> {
-    if (this.isSubmitting) return;
+  private async submit(openNote: () => Promise<boolean>): Promise<void> {
+    if (this.isSubmitting || this.isClosed) return;
 
     this.isSubmitting = true;
-    const didOpenNote = await this.plugin.openDailyNoteFromInput(input.getValue());
-    if (didOpenNote) {
-      this.close();
-    } else {
+    this.contentEl.setAttribute("aria-busy", "true");
+    if (this.input) this.input.inputEl.disabled = true;
+    for (const button of this.buttons) button.disabled = true;
+    this.submitButton?.setText("Opening…");
+    this.statusEl?.setText("");
+    try {
+      if (await openNote()) {
+        if (!this.isClosed) this.close();
+      } else {
+        this.statusEl?.setText("Check the date and daily notes settings, then try again.");
+      }
+    } catch (error) {
+      console.error("Weekday Commands: date picker failed to open a note", error);
+      this.statusEl?.setText("Could not open the note. Please try again.");
+    } finally {
       this.isSubmitting = false;
-      input.inputEl.select();
+      this.contentEl.removeAttribute("aria-busy");
+      if (!this.isClosed) {
+        if (this.input) this.input.inputEl.disabled = false;
+        for (const button of this.buttons) button.disabled = false;
+        this.submitButton?.setText("Open note");
+        this.input?.inputEl.focus();
+        this.input?.inputEl.select();
+      }
     }
-  }
-
-  private async openRecentNote(file: TFile): Promise<void> {
-    if (this.isSubmitting) return;
-
-    this.isSubmitting = true;
-    await this.plugin.openRecentDailyNote(file);
-    this.close();
   }
 }
 
@@ -696,12 +770,14 @@ class WeekdayCommandsSettingTab extends PluginSettingTab {
     setting
       .setName("Daily notes folder")
       .setDesc("Optional folder override for this plugin. Leave blank to use the daily notes plugin folder.")
-      .addText((text) => text
-        .setPlaceholder("Daily")
-        .setValue(this.plugin.settings.dailyNotesFolder)
-        .onChange(async (value) => {
-          this.plugin.settings.dailyNotesFolder = value.trim();
-          await this.plugin.saveSettings();
-        }));
+      .addText((text) => {
+        text.setPlaceholder("Daily").setValue(this.plugin.settings.dailyNotesFolder);
+        text.inputEl.addEventListener("change", () => {
+          const value = text.getValue().trim();
+          if (value === this.plugin.settings.dailyNotesFolder) return;
+          this.plugin.settings.dailyNotesFolder = value;
+          void this.plugin.saveSettings();
+        });
+      });
   }
 }
