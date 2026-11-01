@@ -2,7 +2,7 @@
 
 Open the next occurrence of any weekday, or pick a date, from the command palette. If the daily note doesn't exist yet, it's created from your Daily Notes template.
 
-![Weekday commands in the command palette](assets/weekday-commands.png)
+![Weekday commands in the command palette](assets/weekday-commands.gif)
 
 *Mockup with sample data.*
 
