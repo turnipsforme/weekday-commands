@@ -8,7 +8,7 @@ Open the next occurrence of any weekday, or pick a date, from the command palett
 
 ## Commands
 
-- **Go to daily note by date** opens a focused date picker. It accepts calendar dates, natural-language dates when Natural Language Dates is installed, and shortcuts to your three most recently edited daily notes. Press Enter or use **Open note** to open the date. Failed opens keep the picker available so you can retry.
+- **Go to daily note by date** opens a date picker. It accepts calendar dates, natural-language dates when Natural Language Dates is installed, and shortcuts to your three most recently edited daily notes. Press Enter or use **Open note** to open the date. If opening fails, the picker stays open so you can retry.
 - **Go to next Sunday** through **Go to next Saturday** opens the next occurrence of that weekday.
 
 Calendar dates are checked strictly, so invalid dates such as `2026-02-29` are rejected. Use `YYYY-MM-DD` to avoid ambiguity in numeric dates. Built-in relative phrases include `in 3 days`, `next week`, and `next December`.
@@ -17,7 +17,7 @@ Plain weekday entries such as `Friday` always mean the upcoming occurrence. Toda
 
 ## Settings
 
-- **Integrate with Journal View** (off by default): sends every Weekday Commands navigation to Journal View, using its normal nearby animation or distant snap. Notes are still created when missing.
+- **Integrate with Journal View** (off by default): sends every Weekday Commands navigation to Journal View, with its normal nearby animation or distant snap. Missing notes are still created.
 - **Daily notes folder**: optionally overrides the Daily Notes plugin folder for Weekday Commands. Edits save when you leave the field. Date formats containing folders, such as `YYYY/MM/YYYY-MM-DD`, are supported.
 
 ## Requirements
@@ -26,7 +26,7 @@ Configure your preferred date format, folder, and template in Obsidian's built-i
 
 ## Privacy
 
-Weekday Commands works locally in your vault. It does not use network services or collect telemetry. There are no recurring timers or vault watchers. Recent notes are looked up only when the picker opens, using the configured folder. Pointer presses use a short CSS transition; reduced-motion preferences are respected.
+Weekday Commands works locally in your vault, with no network services or telemetry. It has no recurring timers or vault watchers, and looks up recent notes only when the picker opens, using the configured folder. Pointer presses use a short CSS transition that respects reduced-motion preferences.
 
 ## Development
 
