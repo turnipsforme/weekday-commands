@@ -1,7 +1,7 @@
 {
   "name": "weekday-commands",
   "version": "0.1.5",
-  "description": "Obsidian plugin with commands for each day of the week.",
+  "description": "Open or create the next daily note for any weekday.",
   "main": "main.js",
   "scripts": {
     "build": "tsc --noEmit && esbuild main.ts --bundle --outfile=main.js --format=cjs --platform=node --external:obsidian",

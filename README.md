@@ -1,6 +1,10 @@
 # Weekday Commands
 
-Jump to any upcoming weekday or choose a date without leaving the command palette. Weekday Commands opens the matching daily note and creates it from your Daily Notes template when it does not exist yet.
+Open the next occurrence of any weekday, or pick a date, from the command palette. If the daily note doesn't exist yet, it's created from your Daily Notes template.
+
+![Weekday commands in the command palette](assets/weekday-commands.png)
+
+*Mockup with sample data.*
 
 ## Commands
 
